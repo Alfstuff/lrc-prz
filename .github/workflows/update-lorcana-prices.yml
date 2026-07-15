@@ -1,0 +1,32 @@
+name: Update Lorcana prices
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update-prices:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch prices
+        env:
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        run: python tools/fetch_lorcana_prices.py
+
+      - name: Commit updated prices
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: Update Lorcana prices
+          file_pattern: data/lorcana-prices-v1.json
