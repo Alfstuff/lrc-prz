@@ -65,9 +65,18 @@ def compact_variant(card):
         "tcggo_id": card.get("id"),
         "cardmarket_id": card.get("cardmarket_id"),
         "rarity": card.get("rarity"),
+        "currency": cardmarket.get("currency"),
         "price_eur": market_price(card),
+        "7d_average": cardmarket.get("7d_average"),
+        "30d_average": cardmarket.get("30d_average"),
         "lowest_near_mint_eu_only": cardmarket.get("lowest_near_mint_EU_only"),
         "lowest_near_mint": cardmarket.get("lowest_near_mint"),
+        "lowest_near_mint_de": cardmarket.get("lowest_near_mint_DE"),
+        "lowest_near_mint_de_eu_only": cardmarket.get("lowest_near_mint_DE_EU_only"),
+        "lowest_near_mint_fr": cardmarket.get("lowest_near_mint_FR"),
+        "lowest_near_mint_fr_eu_only": cardmarket.get("lowest_near_mint_FR_EU_only"),
+        "lowest_near_mint_it": cardmarket.get("lowest_near_mint_IT"),
+        "lowest_near_mint_it_eu_only": cardmarket.get("lowest_near_mint_IT_EU_only"),
         "available_items": cardmarket.get("available_items"),
     }
 
@@ -123,7 +132,7 @@ def build_price_entry(episode, group_cards):
     single_special_finish = has_single_special_finish(group_cards)
 
     regular_variant = sorted_variants[0] if sorted_variants else None
-    foil_variant = None if single_special_finish else (sorted_variants[-1] if sorted_variants else None)
+    foil_variant = None if single_special_finish or len(sorted_variants) < 2 else sorted_variants[-1]
     reference_card = group_cards[0]
 
     regular_price = market_price(regular_variant) if regular_variant else None
@@ -167,7 +176,7 @@ def main():
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "lorcana-prices-api",
-        "price_rule": "Use lowest_near_mint_EU_only, fallback to lowest_near_mint. Epic and Enchanted are treated as single special finish. For duplicate standard same set/name/number variants, lower price is regular and higher price is foil.",
+        "price_rule": "Use lowest_near_mint_EU_only, fallback to lowest_near_mint. Store available Cardmarket aggregates such as 7d_average, 30d_average, global/EU lows and language lows when provided. Epic and Enchanted are treated as single special finish. For duplicate standard same set/name/number variants, lower price is regular and higher price is foil.",
         "episodes": [],
         "prices": [],
     }
