@@ -6,6 +6,7 @@ import time
 import unicodedata
 import urllib.parse
 import urllib.request
+from urllib.error import HTTPError
 from datetime import datetime, timezone
 
 
@@ -30,9 +31,9 @@ def request_json(path, query=None):
     request = urllib.request.Request(
         url,
         headers={
-            "Content-Type": "application/json",
-            "x-rapidapi-host": API_HOST,
-            "x-rapidapi-key": api_key,
+            "Accept": "application/json",
+            "X-RapidAPI-Host": API_HOST,
+            "X-RapidAPI-Key": api_key,
         },
     )
 
@@ -40,6 +41,14 @@ def request_json(path, query=None):
         try:
             with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            error_body = error.read().decode("utf-8", errors="replace")
+            message = f"HTTP {error.code} while requesting {path}: {error_body}"
+            if 400 <= error.code < 500:
+                raise RuntimeError(message) from error
+            if attempt == MAX_RETRIES:
+                raise RuntimeError(message) from error
+            time.sleep(attempt * 2)
         except Exception:
             if attempt == MAX_RETRIES:
                 raise
