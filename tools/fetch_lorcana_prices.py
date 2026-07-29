@@ -78,10 +78,7 @@ def normalize_key(value):
 def market_price(card):
     prices = card.get("prices") or {}
     cardmarket = prices.get("cardmarket") or {}
-    return effective_lowest(cardmarket, EU_LOW_FIELDS) or effective_lowest(
-        cardmarket,
-        GLOBAL_LOW_FIELDS + EU_LOW_FIELDS,
-    )
+    return cardmarket.get("lowest_near_mint_EU_only") or cardmarket.get("lowest_near_mint")
 
 
 def numeric_price(value):
