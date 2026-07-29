@@ -17,6 +17,20 @@ PER_PAGE = 100
 REQUEST_TIMEOUT_SECONDS = 30
 MAX_RETRIES = 3
 
+GLOBAL_LOW_FIELDS = [
+    "lowest_near_mint",
+    "lowest_near_mint_DE",
+    "lowest_near_mint_FR",
+    "lowest_near_mint_IT",
+]
+
+EU_LOW_FIELDS = [
+    "lowest_near_mint_EU_only",
+    "lowest_near_mint_DE_EU_only",
+    "lowest_near_mint_FR_EU_only",
+    "lowest_near_mint_IT_EU_only",
+]
+
 
 def request_json(path, query=None):
     api_key = os.environ.get("RAPIDAPI_KEY")
@@ -64,7 +78,25 @@ def normalize_key(value):
 def market_price(card):
     prices = card.get("prices") or {}
     cardmarket = prices.get("cardmarket") or {}
-    return cardmarket.get("lowest_near_mint_EU_only") or cardmarket.get("lowest_near_mint")
+    return effective_lowest(cardmarket, EU_LOW_FIELDS) or effective_lowest(
+        cardmarket,
+        GLOBAL_LOW_FIELDS + EU_LOW_FIELDS,
+    )
+
+
+def numeric_price(value):
+    if isinstance(value, (int, float)) and value >= 0:
+        return value
+    return None
+
+
+def effective_lowest(cardmarket, field_names):
+    values = [
+        numeric_price(cardmarket.get(field_name))
+        for field_name in field_names
+    ]
+    values = [value for value in values if value is not None]
+    return min(values) if values else None
 
 
 def compact_variant(card):
@@ -78,6 +110,11 @@ def compact_variant(card):
         "price_eur": market_price(card),
         "7d_average": cardmarket.get("7d_average"),
         "30d_average": cardmarket.get("30d_average"),
+        "effective_lowest_near_mint_eu_only": effective_lowest(cardmarket, EU_LOW_FIELDS),
+        "effective_lowest_near_mint": effective_lowest(
+            cardmarket,
+            GLOBAL_LOW_FIELDS + EU_LOW_FIELDS,
+        ),
         "lowest_near_mint_eu_only": cardmarket.get("lowest_near_mint_EU_only"),
         "lowest_near_mint": cardmarket.get("lowest_near_mint"),
         "lowest_near_mint_de": cardmarket.get("lowest_near_mint_DE"),
@@ -185,7 +222,7 @@ def main():
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "lorcana-prices-api",
-        "price_rule": "Use lowest_near_mint_EU_only, fallback to lowest_near_mint. Store available Cardmarket aggregates such as 7d_average, 30d_average, global/EU lows and language lows when provided. Epic and Enchanted are treated as single special finish. For duplicate standard same set/name/number variants, lower price is regular and higher price is foil.",
+        "price_rule": "Use the lowest available EU-only Near Mint value across generic and language-specific Cardmarket lows, fallback to the lowest available global Near Mint value across generic and language-specific lows. Store raw API aggregates such as 7d_average, 30d_average, global/EU lows and language lows when provided. Epic and Enchanted are treated as single special finish. For duplicate standard same set/name/number variants, lower price is regular and higher price is foil.",
         "episodes": [],
         "prices": [],
     }
