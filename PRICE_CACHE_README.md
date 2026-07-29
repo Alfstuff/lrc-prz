@@ -29,8 +29,8 @@ https://raw.githubusercontent.com/<owner>/<repo>/main/data/lorcana-prices-v1.jso
 
 ## Price Rules
 
-- Main price: `lowest_near_mint_EU_only`.
-- Fallback: `lowest_near_mint`.
+- Main price: lowest available EU-only Near Mint value across generic and language-specific Cardmarket lows.
+- Fallback: lowest available global Near Mint value across generic and language-specific lows.
 - Duplicate same set/name/number variants are sorted by price.
 - Lower priced variant is treated as regular.
 - Higher priced variant is treated as foil.
