@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import csv
+import gzip
+import io
 import json
 import os
 import sys
@@ -12,6 +15,7 @@ from datetime import datetime, timezone
 
 API_BASE_URL = "https://lorcana-prices-api.p.rapidapi.com"
 API_HOST = "lorcana-prices-api.p.rapidapi.com"
+LORCANA_JSON_URL = "https://lorcanajson.org/files/current/en/allCards.json"
 OUTPUT_PATH = "data/lorcana-prices-v1.json"
 PER_PAGE = 100
 REQUEST_TIMEOUT_SECONDS = 30
@@ -75,7 +79,30 @@ def normalize_key(value):
     return " ".join(ascii_value.casefold().split())
 
 
+def normalized_card_number(value):
+    text = str(value).strip()
+    digits = []
+    for character in text:
+        if not character.isdigit():
+            break
+        digits.append(character)
+    return str(int("".join(digits))) if digits else normalize_key(text)
+
+
+def price_key(set_code, card_number, name):
+    return "|".join(
+        [
+            normalize_key(set_code),
+            normalized_card_number(card_number),
+            normalize_key(name),
+        ]
+    )
+
+
 def market_price(card):
+    if not card:
+        return None
+
     prices = card.get("prices") or {}
     cardmarket = prices.get("cardmarket") or {}
     return cardmarket.get("lowest_near_mint_EU_only") or cardmarket.get("lowest_near_mint")
@@ -87,6 +114,37 @@ def numeric_price(value):
     return None
 
 
+def parse_price(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        return numeric_price(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    text = (
+        text.replace("\u00a0", "")
+        .replace("€", "")
+        .replace("EUR", "")
+        .replace(" ", "")
+    )
+
+    if "," in text and "." in text:
+        text = text.replace(".", "").replace(",", ".")
+    else:
+        text = text.replace(",", ".")
+
+    try:
+        price = float(text)
+    except ValueError:
+        return None
+
+    return price if price >= 0 else None
+
+
 def effective_lowest(cardmarket, field_names):
     values = [
         numeric_price(cardmarket.get(field_name))
@@ -96,12 +154,15 @@ def effective_lowest(cardmarket, field_names):
     return min(values) if values else None
 
 
-def compact_variant(card):
+def compact_variant(card, fallback_metadata=None):
+    fallback_metadata = fallback_metadata or {}
     prices = card.get("prices") or {}
     cardmarket = prices.get("cardmarket") or {}
     return {
         "tcggo_id": card.get("id"),
-        "cardmarket_id": card.get("cardmarket_id"),
+        "cardmarket_id": card.get("cardmarket_id") or fallback_metadata.get("cardmarket_id"),
+        "cardmarket_url": fallback_metadata.get("cardmarket_url"),
+        "tcgplayer_id": fallback_metadata.get("tcgplayer_id"),
         "rarity": card.get("rarity"),
         "currency": cardmarket.get("currency"),
         "price_eur": market_price(card),
@@ -169,7 +230,250 @@ def fetch_episode_cards(episode_id):
         time.sleep(0.25)
 
 
-def build_price_entry(episode, group_cards):
+def fetch_lorcanajson_metadata():
+    try:
+        with urllib.request.urlopen(LORCANA_JSON_URL, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as error:
+        print(f"Warning: unable to fetch LorcanaJSON metadata: {error}", file=sys.stderr)
+        return {}
+
+    metadata_by_key = {}
+    for card in payload.get("cards", []):
+        external_links = card.get("externalLinks") or {}
+        effective_set_code = card.get("promoGrouping") or card.get("setCode")
+        key = price_key(effective_set_code, card.get("number"), card.get("name"))
+        metadata_by_key[key] = {
+            "cardmarket_id": external_links.get("cardmarketId"),
+            "cardmarket_url": external_links.get("cardmarketUrl"),
+            "tcgplayer_id": external_links.get("tcgPlayerId"),
+        }
+
+    return metadata_by_key
+
+
+def normalized_column_name(value):
+    return normalize_key(value).replace(".", "").replace("+", " plus")
+
+
+def first_price(row, column_names):
+    for column_name in column_names:
+        price = parse_price(row.get(column_name))
+        if price is not None:
+            return price
+    return None
+
+
+def decode_price_guide_bytes(payload, source_name):
+    if source_name.endswith(".gz") or payload[:2] == b"\x1f\x8b":
+        payload = gzip.decompress(payload)
+
+    return payload.decode("utf-8-sig")
+
+
+def read_cardmarket_price_guide_source(source):
+    if source.startswith(("http://", "https://")):
+        request = urllib.request.Request(
+            source,
+            headers={
+                "Accept": "text/csv,application/gzip,application/octet-stream,*/*",
+                "User-Agent": "LorcanaVaultPriceGenerator/1.0",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            return decode_price_guide_bytes(response.read(), source)
+
+    with open(source, "rb") as file:
+        return decode_price_guide_bytes(file.read(), source)
+
+
+def fetch_cardmarket_price_guide():
+    source = os.environ.get("CARDMARKET_PRICE_GUIDE_URL") or os.environ.get("CARDMARKET_PRICE_GUIDE_PATH")
+    if not source:
+        print("Cardmarket price guide fallback disabled: missing CARDMARKET_PRICE_GUIDE_URL", flush=True)
+        return {}
+
+    try:
+        csv_text = read_cardmarket_price_guide_source(source)
+    except Exception as error:
+        print(f"Warning: unable to fetch Cardmarket price guide: {error}", file=sys.stderr)
+        return {}
+
+    stripped_text = csv_text.lstrip()
+    if stripped_text.startswith("{") or stripped_text.startswith("["):
+        return parse_cardmarket_price_guide_json(stripped_text)
+
+    sample = csv_text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    reader = csv.DictReader(io.StringIO(csv_text), dialect=dialect)
+    price_guide_by_product_id = {}
+
+    for raw_row in reader:
+        row = {
+            normalized_column_name(key): value
+            for key, value in raw_row.items()
+            if key is not None
+        }
+        product_id = (
+            row.get("idproduct")
+            or row.get("id product")
+            or row.get("product id")
+            or row.get("id")
+        )
+        if not product_id:
+            continue
+
+        product_id = str(product_id).strip()
+        low_price = first_price(row, ["low price", "low", "from"])
+        low_price_ex = first_price(row, ["low price ex plus", "low ex plus", "lowex", "lowex plus"])
+        trend_price = first_price(row, ["trend price", "trend"])
+        average_7d = first_price(row, ["avg7", "avg 7", "7d average", "7 days average"])
+        average_30d = first_price(row, ["avg30", "avg 30", "30d average", "30 days average"])
+        foil_low_price = first_price(row, ["foil low", "low foil", "lowfoil"])
+        foil_trend_price = first_price(row, ["foil trend", "trend foil", "trendfoil"])
+
+        price_guide_by_product_id[product_id] = {
+            "price_eur": low_price_ex or low_price or trend_price,
+            "lowest_near_mint": low_price_ex or low_price,
+            "trend_price": trend_price,
+            "7d_average": average_7d,
+            "30d_average": average_30d,
+            "foil_price_eur": foil_low_price or foil_trend_price,
+            "foil_lowest_near_mint": foil_low_price,
+            "foil_trend_price": foil_trend_price,
+        }
+
+    print(f"Loaded {len(price_guide_by_product_id)} Cardmarket price guide entries", flush=True)
+    return price_guide_by_product_id
+
+
+def parse_cardmarket_price_guide_json(json_text):
+    payload = json.loads(json_text)
+    if isinstance(payload, dict):
+        rows = payload.get("priceGuides") or payload.get("price_guides") or payload.get("data") or []
+    else:
+        rows = payload
+
+    price_guide_by_product_id = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        product_id = row.get("idProduct") or row.get("idproduct") or row.get("id_product") or row.get("id")
+        if product_id is None:
+            continue
+
+        low_price = parse_price(row.get("low"))
+        trend_price = parse_price(row.get("trend"))
+        average_7d = parse_price(row.get("avg7"))
+        average_30d = parse_price(row.get("avg30"))
+        foil_low_price = parse_price(row.get("low-foil") or row.get("lowFoil"))
+        foil_trend_price = parse_price(row.get("trend-foil") or row.get("trendFoil"))
+
+        price_guide_by_product_id[str(product_id).strip()] = {
+            "price_eur": low_price or trend_price,
+            "lowest_near_mint": low_price,
+            "trend_price": trend_price,
+            "7d_average": average_7d,
+            "30d_average": average_30d,
+            "foil_price_eur": foil_low_price or foil_trend_price,
+            "foil_lowest_near_mint": foil_low_price,
+            "foil_trend_price": foil_trend_price,
+            "foil_7d_average": parse_price(row.get("avg7-foil") or row.get("avg7Foil")),
+            "foil_30d_average": parse_price(row.get("avg30-foil") or row.get("avg30Foil")),
+        }
+
+    print(f"Loaded {len(price_guide_by_product_id)} Cardmarket price guide entries", flush=True)
+    return price_guide_by_product_id
+
+
+def cardmarket_price_guide_variant(product_id, price_guide, fallback_metadata):
+    price = price_guide.get("price_eur")
+    if price is None:
+        return None
+
+    return {
+        "tcggo_id": None,
+        "cardmarket_id": product_id,
+        "cardmarket_url": fallback_metadata.get("cardmarket_url"),
+        "tcgplayer_id": fallback_metadata.get("tcgplayer_id"),
+        "rarity": None,
+        "currency": "EUR",
+        "price_eur": price,
+        "7d_average": price_guide.get("7d_average"),
+        "30d_average": price_guide.get("30d_average"),
+        "effective_lowest_near_mint_eu_only": price,
+        "effective_lowest_near_mint": price,
+        "lowest_near_mint_eu_only": price,
+        "lowest_near_mint": price_guide.get("lowest_near_mint") or price,
+        "lowest_near_mint_de": None,
+        "lowest_near_mint_de_eu_only": None,
+        "lowest_near_mint_fr": None,
+        "lowest_near_mint_fr_eu_only": None,
+        "lowest_near_mint_it": None,
+        "lowest_near_mint_it_eu_only": None,
+        "available_items": None,
+        "trend_price": price_guide.get("trend_price"),
+        "source": "cardmarket_price_guide",
+    }
+
+
+def apply_cardmarket_price_guide_fallback(price_entries, price_guide_by_product_id):
+    if not price_guide_by_product_id:
+        return 0
+
+    fallback_count = 0
+
+    for entry in price_entries:
+        if entry.get("regular_price_eur") is not None or entry.get("special_price_eur") is not None:
+            continue
+
+        product_id = entry.get("external_cardmarket_id")
+        if product_id is None:
+            continue
+
+        price_guide = price_guide_by_product_id.get(str(product_id))
+        if not price_guide:
+            continue
+
+        fallback_metadata = {
+            "cardmarket_id": product_id,
+            "cardmarket_url": entry.get("external_cardmarket_url"),
+        }
+        regular_variant = cardmarket_price_guide_variant(product_id, price_guide, fallback_metadata)
+        if not regular_variant:
+            continue
+
+        entry["regular_price_eur"] = regular_variant["price_eur"]
+        entry["price_source"] = "lorcana_prices_api_then_cardmarket_price_guide"
+        entry["priced_variant_count"] = max(entry.get("priced_variant_count") or 0, 1)
+        entry["regular_variant"] = regular_variant
+
+        if entry.get("finish_type") == "special":
+            entry["special_price_eur"] = regular_variant["price_eur"]
+
+        foil_price = price_guide.get("foil_price_eur")
+        if foil_price is not None and entry.get("foil_price_eur") is None:
+            entry["foil_price_eur"] = foil_price
+            entry["foil_variant"] = {
+                **regular_variant,
+                "price_eur": foil_price,
+                "7d_average": price_guide.get("foil_7d_average"),
+                "30d_average": price_guide.get("foil_30d_average"),
+                "lowest_near_mint_eu_only": price_guide.get("foil_lowest_near_mint") or foil_price,
+                "lowest_near_mint": price_guide.get("foil_lowest_near_mint") or foil_price,
+                "trend_price": price_guide.get("foil_trend_price"),
+            }
+
+        fallback_count += 1
+
+    return fallback_count
+
+
+def build_price_entry(episode, group_cards, metadata_by_key):
     priced_variants = [card for card in group_cards if market_price(card) is not None]
     sorted_variants = sorted(priced_variants, key=market_price)
     single_special_finish = has_single_special_finish(group_cards)
@@ -181,6 +485,12 @@ def build_price_entry(episode, group_cards):
     regular_price = market_price(regular_variant) if regular_variant else None
     foil_price = market_price(foil_variant) if foil_variant else None
     special_price = regular_price if single_special_finish else None
+    entry_key = price_key(
+        episode.get("code", ""),
+        reference_card.get("card_number"),
+        reference_card.get("name", ""),
+    )
+    fallback_metadata = metadata_by_key.get(entry_key, {})
 
     return {
         "set_code": episode.get("code"),
@@ -189,13 +499,7 @@ def build_price_entry(episode, group_cards):
         "card_number": str(reference_card.get("card_number")),
         "name": reference_card.get("name"),
         "rarity": reference_card.get("rarity"),
-        "key": "|".join(
-            [
-                normalize_key(episode.get("code", "")),
-                str(reference_card.get("card_number")),
-                normalize_key(reference_card.get("name", "")),
-            ]
-        ),
+        "key": entry_key,
         "finish_type": "special" if single_special_finish else "standard",
         "regular_price_eur": regular_price,
         "foil_price_eur": foil_price,
@@ -203,14 +507,18 @@ def build_price_entry(episode, group_cards):
         "price_source": "eu_only_then_lowest",
         "variant_count": len(group_cards),
         "priced_variant_count": len(priced_variants),
-        "regular_variant": compact_variant(regular_variant) if regular_variant else None,
-        "foil_variant": compact_variant(foil_variant) if foil_variant else None,
-        "variants": [compact_variant(card) for card in group_cards],
+        "external_cardmarket_id": fallback_metadata.get("cardmarket_id"),
+        "external_cardmarket_url": fallback_metadata.get("cardmarket_url"),
+        "regular_variant": compact_variant(regular_variant, fallback_metadata) if regular_variant else None,
+        "foil_variant": compact_variant(foil_variant, fallback_metadata) if foil_variant else None,
+        "variants": [compact_variant(card, fallback_metadata) for card in group_cards],
     }
 
 
 def main():
     episodes = fetch_all_episodes()
+    metadata_by_key = fetch_lorcanajson_metadata()
+    cardmarket_price_guide = fetch_cardmarket_price_guide()
     only_episode_id = os.environ.get("ONLY_EPISODE_ID")
     if only_episode_id:
         episodes = [episode for episode in episodes if str(episode.get("id")) == only_episode_id]
@@ -219,7 +527,7 @@ def main():
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "lorcana-prices-api",
-        "price_rule": "Use the lowest available EU-only Near Mint value across generic and language-specific Cardmarket lows, fallback to the lowest available global Near Mint value across generic and language-specific lows. Store raw API aggregates such as 7d_average, 30d_average, global/EU lows and language lows when provided. Epic and Enchanted are treated as single special finish. For duplicate standard same set/name/number variants, lower price is regular and higher price is foil.",
+        "price_rule": "Use the lowest available EU-only Near Mint value across generic and language-specific Cardmarket lows, fallback to the lowest available global Near Mint value across generic and language-specific lows. If Lorcana Prices API has no price for a card, optionally fallback to the public Cardmarket Price Guide matched by LorcanaJSON cardmarketId. Store raw API aggregates such as 7d_average, 30d_average, global/EU lows and language lows when provided. Epic and Enchanted are treated as single special finish. For duplicate standard same set/name/number variants, lower price is regular and higher price is foil.",
         "episodes": [],
         "prices": [],
     }
@@ -244,15 +552,14 @@ def main():
 
         grouped_cards = {}
         for card in cards:
-            group_key = (
-                normalize_key(episode.get("code", "")),
-                str(card.get("card_number")),
-                normalize_key(card.get("name", "")),
-            )
+            group_key = price_key(episode.get("code", ""), card.get("card_number"), card.get("name", ""))
             grouped_cards.setdefault(group_key, []).append(card)
 
         for group_cards in grouped_cards.values():
-            output["prices"].append(build_price_entry(episode, group_cards))
+            output["prices"].append(build_price_entry(episode, group_cards, metadata_by_key))
+
+    fallback_count = apply_cardmarket_price_guide_fallback(output["prices"], cardmarket_price_guide)
+    output["cardmarket_price_guide_fallback_count"] = fallback_count
 
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8") as file:
