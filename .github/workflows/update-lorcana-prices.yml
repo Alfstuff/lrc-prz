@@ -23,6 +23,7 @@ jobs:
       - name: Fetch prices
         env:
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+          CARDMARKET_PRICE_GUIDE_URL: ${{ vars.CARDMARKET_PRICE_GUIDE_URL }}
         run: python tools/fetch_lorcana_prices.py
 
       - name: Commit updated prices
