@@ -14,8 +14,16 @@ This repo can publish a daily `data/lorcana-prices-v1.json` file with Cardmarket
 https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_19.json
 ```
 
-6. Open `Actions > Update Lorcana prices`.
-7. Run the workflow manually once with `Run workflow`.
+6. Optional: add these repository variables for sealed products and Lorcana accessories. The script has the same values as defaults, but defining them in GitHub makes the setup explicit:
+
+```text
+CARDMARKET_LORCANA_NONSINGLES_URL=https://downloads.s3.cardmarket.com/productCatalog/productList/products_nonsingles_19.json
+CARDMARKET_ACCESSORIES_URL=https://downloads.s3.cardmarket.com/productCatalog/productList/products_accessories.json
+CARDMARKET_ACCESSORIES_PRICE_GUIDE_URL=https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_accessories.json
+```
+
+7. Open `Actions > Update Lorcana prices`.
+8. Run the workflow manually once with `Run workflow`.
 
 The workflow also runs every day at 04:17 UTC.
 
@@ -45,3 +53,5 @@ https://raw.githubusercontent.com/<owner>/<repo>/main/data/lorcana-prices-v1.jso
 - Cardmarket Price Guide fallback is matched by `idProduct` from LorcanaJSON `externalLinks.cardmarketId`.
 - Fallback prices support Cardmarket JSON, CSV and CSV.GZ.
 - Fallback prices use the guide's `low` / `Low Price` first, then `trend` / `Trend Price`.
+- The output also includes `sealed_products`, built from Cardmarket public non-singles/accessories product catalog files and joined to price guides by `idProduct`.
+- Sealed product images are intentionally stored as `image_url: null` until an image database is available.
