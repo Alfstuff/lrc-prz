@@ -17,6 +17,9 @@ API_BASE_URL = "https://lorcana-prices-api.p.rapidapi.com"
 API_HOST = "lorcana-prices-api.p.rapidapi.com"
 LORCANA_JSON_URL = "https://lorcanajson.org/files/current/en/allCards.json"
 OUTPUT_PATH = "data/lorcana-prices-v1.json"
+CARDMARKET_LORCANA_NONSINGLES_URL = "https://downloads.s3.cardmarket.com/productCatalog/productList/products_nonsingles_19.json"
+CARDMARKET_ACCESSORIES_URL = "https://downloads.s3.cardmarket.com/productCatalog/productList/products_accessories.json"
+CARDMARKET_ACCESSORIES_PRICE_GUIDE_URL = "https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_accessories.json"
 PER_PAGE = 100
 REQUEST_TIMEOUT_SECONDS = 30
 MAX_RETRIES = 3
@@ -390,6 +393,50 @@ def parse_cardmarket_price_guide_json(json_text):
     return price_guide_by_product_id
 
 
+def fetch_json_url(url, label):
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json,*/*",
+            "User-Agent": "LorcanaVaultPriceGenerator/1.0",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_cardmarket_product_catalog(source, label):
+    if not source:
+        print(f"{label} catalog disabled: missing URL", flush=True)
+        return []
+
+    try:
+        payload = fetch_json_url(source, label)
+    except Exception as error:
+        print(f"Warning: unable to fetch {label} catalog: {error}", file=sys.stderr)
+        return []
+
+    products = payload.get("products") if isinstance(payload, dict) else payload
+    products = products if isinstance(products, list) else []
+    print(f"Loaded {len(products)} {label} product entries", flush=True)
+    return [product for product in products if isinstance(product, dict)]
+
+
+def fetch_accessories_price_guide():
+    source = os.environ.get("CARDMARKET_ACCESSORIES_PRICE_GUIDE_URL", CARDMARKET_ACCESSORIES_PRICE_GUIDE_URL)
+    try:
+        csv_text = read_cardmarket_price_guide_source(source)
+    except Exception as error:
+        print(f"Warning: unable to fetch Cardmarket accessories price guide: {error}", file=sys.stderr)
+        return {}
+
+    stripped_text = csv_text.lstrip()
+    if stripped_text.startswith("{") or stripped_text.startswith("["):
+        return parse_cardmarket_price_guide_json(stripped_text)
+
+    return {}
+
+
 def cardmarket_price_guide_variant(product_id, price_guide, fallback_metadata):
     price = price_guide.get("price_eur")
     if price is None:
@@ -473,6 +520,103 @@ def apply_cardmarket_price_guide_fallback(price_entries, price_guide_by_product_
     return fallback_count
 
 
+def sealed_product_category_group(category_name):
+    normalized = normalize_key(category_name)
+    if "booster boxes" in normalized:
+        return "booster_box"
+    if "booster" in normalized:
+        return "booster"
+    if "starter" in normalized:
+        return "starter_deck"
+    if "gift" in normalized:
+        return "gift_set"
+    if "box set" in normalized:
+        return "box_set"
+    if normalized.endswith("sets") or "lorcana sets" in normalized:
+        return "set"
+    if "lots" in normalized:
+        return "lot"
+    if "playmat" in normalized:
+        return "playmat"
+    if "sleeve" in normalized:
+        return "sleeves"
+    if "deckbox" in normalized or "deck box" in normalized:
+        return "deck_box"
+    if "album" in normalized:
+        return "album"
+    if "memorabilia" in normalized:
+        return "memorabilia"
+    if "storage" in normalized:
+        return "storage"
+    return "other"
+
+
+def should_include_lorcana_accessory(product):
+    text = normalize_key(f"{product.get('name', '')} {product.get('categoryName', '')}")
+    return "lorcana" in text or "disney lorcana" in text
+
+
+def build_sealed_product_entry(product, price_guide, source):
+    product_id = product.get("idProduct")
+    if product_id is None:
+        return None
+
+    price = price_guide.get(str(product_id).strip()) or {}
+    category_name = product.get("categoryName") or ""
+    low_price = price.get("price_eur")
+
+    return {
+        "id": f"cardmarket-{product_id}",
+        "cardmarket_id": product_id,
+        "name": product.get("name"),
+        "category_id": product.get("idCategory"),
+        "category_name": category_name,
+        "category_group": sealed_product_category_group(category_name),
+        "expansion_id": product.get("idExpansion"),
+        "metacard_id": product.get("idMetacard"),
+        "date_added": product.get("dateAdded"),
+        "image_url": None,
+        "currency": "EUR",
+        "price_eur": low_price,
+        "lowest_price_eur": price.get("lowest_near_mint") or low_price,
+        "trend_price_eur": price.get("trend_price"),
+        "7d_average_eur": price.get("7d_average"),
+        "30d_average_eur": price.get("30d_average"),
+        "source": source,
+    }
+
+
+def build_sealed_products(cardmarket_price_guide):
+    nonsingles_source = os.environ.get("CARDMARKET_LORCANA_NONSINGLES_URL", CARDMARKET_LORCANA_NONSINGLES_URL)
+    accessories_source = os.environ.get("CARDMARKET_ACCESSORIES_URL", CARDMARKET_ACCESSORIES_URL)
+    nonsingles = fetch_cardmarket_product_catalog(nonsingles_source, "Cardmarket Lorcana non-singles")
+    accessories = [
+        product
+        for product in fetch_cardmarket_product_catalog(accessories_source, "Cardmarket accessories")
+        if should_include_lorcana_accessory(product)
+    ]
+    accessories_price_guide = fetch_accessories_price_guide()
+
+    products = []
+    for product in nonsingles:
+        entry = build_sealed_product_entry(product, cardmarket_price_guide, "cardmarket_lorcana_nonsingles")
+        if entry:
+            products.append(entry)
+
+    for product in accessories:
+        entry = build_sealed_product_entry(product, accessories_price_guide, "cardmarket_accessories")
+        if entry:
+            products.append(entry)
+
+    products.sort(key=lambda item: (
+        item.get("category_group") or "",
+        normalize_key(item.get("name") or ""),
+        str(item.get("cardmarket_id") or ""),
+    ))
+    print(f"Built {len(products)} sealed/accessory product entries", flush=True)
+    return products
+
+
 def build_price_entry(episode, group_cards, metadata_by_key):
     priced_variants = [card for card in group_cards if market_price(card) is not None]
     sorted_variants = sorted(priced_variants, key=market_price)
@@ -527,9 +671,10 @@ def main():
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "lorcana-prices-api",
-        "price_rule": "Use the lowest available EU-only Near Mint value across generic and language-specific Cardmarket lows, fallback to the lowest available global Near Mint value across generic and language-specific lows. If Lorcana Prices API has no price for a card, optionally fallback to the public Cardmarket Price Guide matched by LorcanaJSON cardmarketId. Store raw API aggregates such as 7d_average, 30d_average, global/EU lows and language lows when provided. Epic and Enchanted are treated as single special finish. For duplicate standard same set/name/number variants, lower price is regular and higher price is foil.",
+        "price_rule": "Use the lowest available EU-only Near Mint value across generic and language-specific Cardmarket lows, fallback to the lowest available global Near Mint value across generic and language-specific lows. If Lorcana Prices API has no price for a card, optionally fallback to the public Cardmarket Price Guide matched by LorcanaJSON cardmarketId. Store raw API aggregates such as 7d_average, 30d_average, global/EU lows and language lows when provided. Epic and Enchanted are treated as single special finish. For duplicate standard same set/name/number variants, lower price is regular and higher price is foil. Sealed/accessory products are built from Cardmarket public product catalog files and joined to the public price guide by idProduct. Product images are intentionally nullable.",
         "episodes": [],
         "prices": [],
+        "sealed_products": [],
     }
 
     for episode in episodes:
@@ -560,6 +705,7 @@ def main():
 
     fallback_count = apply_cardmarket_price_guide_fallback(output["prices"], cardmarket_price_guide)
     output["cardmarket_price_guide_fallback_count"] = fallback_count
+    output["sealed_products"] = build_sealed_products(cardmarket_price_guide)
 
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8") as file:
