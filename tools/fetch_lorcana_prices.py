@@ -290,6 +290,13 @@ def read_cardmarket_price_guide_source(source):
         return decode_price_guide_bytes(file.read(), source)
 
 
+def env_url_or_default(name, default):
+    value = os.environ.get(name)
+    if value and value.strip():
+        return value.strip()
+    return default
+
+
 def fetch_cardmarket_price_guide():
     source = os.environ.get("CARDMARKET_PRICE_GUIDE_URL") or os.environ.get("CARDMARKET_PRICE_GUIDE_PATH")
     if not source:
@@ -423,7 +430,7 @@ def fetch_cardmarket_product_catalog(source, label):
 
 
 def fetch_accessories_price_guide():
-    source = os.environ.get("CARDMARKET_ACCESSORIES_PRICE_GUIDE_URL", CARDMARKET_ACCESSORIES_PRICE_GUIDE_URL)
+    source = env_url_or_default("CARDMARKET_ACCESSORIES_PRICE_GUIDE_URL", CARDMARKET_ACCESSORIES_PRICE_GUIDE_URL)
     try:
         csv_text = read_cardmarket_price_guide_source(source)
     except Exception as error:
@@ -587,8 +594,8 @@ def build_sealed_product_entry(product, price_guide, source):
 
 
 def build_sealed_products(cardmarket_price_guide):
-    nonsingles_source = os.environ.get("CARDMARKET_LORCANA_NONSINGLES_URL", CARDMARKET_LORCANA_NONSINGLES_URL)
-    accessories_source = os.environ.get("CARDMARKET_ACCESSORIES_URL", CARDMARKET_ACCESSORIES_URL)
+    nonsingles_source = env_url_or_default("CARDMARKET_LORCANA_NONSINGLES_URL", CARDMARKET_LORCANA_NONSINGLES_URL)
+    accessories_source = env_url_or_default("CARDMARKET_ACCESSORIES_URL", CARDMARKET_ACCESSORIES_URL)
     nonsingles = fetch_cardmarket_product_catalog(nonsingles_source, "Cardmarket Lorcana non-singles")
     accessories = [
         product
