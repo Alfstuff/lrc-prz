@@ -20,6 +20,7 @@ OUTPUT_PATH = "data/lorcana-prices-v1.json"
 CARDMARKET_LORCANA_NONSINGLES_URL = "https://downloads.s3.cardmarket.com/productCatalog/productList/products_nonsingles_19.json"
 CARDMARKET_ACCESSORIES_URL = "https://downloads.s3.cardmarket.com/productCatalog/productList/products_accessories.json"
 CARDMARKET_ACCESSORIES_PRICE_GUIDE_URL = "https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_accessories.json"
+SEALED_PRODUCT_IMAGES_PATH = "data/sealed-product-images.json"
 PER_PAGE = 100
 REQUEST_TIMEOUT_SECONDS = 30
 MAX_RETRIES = 3
@@ -82,6 +83,15 @@ def normalize_key(value):
     return " ".join(ascii_value.casefold().split())
 
 
+def slugify(value):
+    text = unicodedata.normalize("NFKD", str(value))
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.replace("&", " and ")
+    text = text.replace("'", "").replace("’", "")
+    text = "".join(character if character.isalnum() else "-" for character in text)
+    return "-".join(part for part in text.split("-") if part)
+
+
 def normalized_card_number(value):
     text = str(value).strip()
     digits = []
@@ -92,10 +102,17 @@ def normalized_card_number(value):
     return str(int("".join(digits))) if digits else normalize_key(text)
 
 
+def normalized_set_code(value):
+    normalized = normalize_key(value)
+    if normalized.startswith("pr") and normalized[2:].isdigit():
+        return f"p{normalized[2:]}"
+    return normalized
+
+
 def price_key(set_code, card_number, name):
     return "|".join(
         [
-            normalize_key(set_code),
+            normalized_set_code(set_code),
             normalized_card_number(card_number),
             normalize_key(name),
         ]
@@ -245,12 +262,20 @@ def fetch_lorcanajson_metadata():
     for card in payload.get("cards", []):
         external_links = card.get("externalLinks") or {}
         effective_set_code = card.get("promoGrouping") or card.get("setCode")
-        key = price_key(effective_set_code, card.get("number"), card.get("name"))
-        metadata_by_key[key] = {
+        metadata = {
             "cardmarket_id": external_links.get("cardmarketId"),
             "cardmarket_url": external_links.get("cardmarketUrl"),
             "tcgplayer_id": external_links.get("tcgPlayerId"),
         }
+        names = {
+            card.get("name"),
+            card.get("fullName"),
+        }
+        for name in names:
+            if not name:
+                continue
+            key = price_key(effective_set_code, card.get("number"), name)
+            metadata_by_key[key] = metadata
 
     return metadata_by_key
 
@@ -412,6 +437,19 @@ def fetch_json_url(url, label):
         return json.loads(response.read().decode("utf-8"))
 
 
+def read_json_source(source, label):
+    if not source:
+        return None
+    try:
+        if source.startswith(("http://", "https://")):
+            return fetch_json_url(source, label)
+        with open(source, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except Exception as error:
+        print(f"Warning: unable to read {label}: {error}", file=sys.stderr)
+        return None
+
+
 def fetch_cardmarket_product_catalog(source, label):
     if not source:
         print(f"{label} catalog disabled: missing URL", flush=True)
@@ -427,6 +465,39 @@ def fetch_cardmarket_product_catalog(source, label):
     products = products if isinstance(products, list) else []
     print(f"Loaded {len(products)} {label} product entries", flush=True)
     return [product for product in products if isinstance(product, dict)]
+
+
+def load_sealed_product_images():
+    source = (
+        os.environ.get("SEALED_PRODUCT_IMAGES_URL")
+        or os.environ.get("SEALED_PRODUCT_IMAGES_PATH")
+        or (SEALED_PRODUCT_IMAGES_PATH if os.path.exists(SEALED_PRODUCT_IMAGES_PATH) else None)
+    )
+    payload = read_json_source(source, "sealed product images")
+    if not payload:
+        return {}
+
+    if isinstance(payload, dict) and isinstance(payload.get("images"), dict):
+        payload = payload["images"]
+
+    if not isinstance(payload, dict):
+        print("Warning: sealed product images source must be a JSON object", file=sys.stderr)
+        return {}
+
+    images = {}
+    for raw_key, raw_value in payload.items():
+        if isinstance(raw_value, str):
+            image_url = raw_value
+        elif isinstance(raw_value, dict):
+            image_url = raw_value.get("image_url") or raw_value.get("url")
+        else:
+            image_url = None
+
+        if image_url:
+            images[str(raw_key).strip()] = image_url
+
+    print(f"Loaded {len(images)} sealed product image mappings", flush=True)
+    return images
 
 
 def fetch_accessories_price_guide():
@@ -486,6 +557,11 @@ def apply_cardmarket_price_guide_fallback(price_entries, price_guide_by_product_
             continue
 
         product_id = entry.get("external_cardmarket_id")
+        if product_id is None:
+            for variant in entry.get("variants") or []:
+                product_id = variant.get("cardmarket_id")
+                if product_id is not None:
+                    break
         if product_id is None:
             continue
 
@@ -558,12 +634,53 @@ def sealed_product_category_group(category_name):
     return "other"
 
 
+def sealed_product_category_path(category_name):
+    normalized = normalize_key(category_name)
+    if "booster boxes" in normalized:
+        return "Booster-Boxes"
+    if "booster" in normalized:
+        return "Boosters"
+    if "starter" in normalized:
+        return "Starter-Decks"
+    if "gift" in normalized:
+        return "Gift-Sets"
+    if "box set" in normalized:
+        return "Box-Sets"
+    if normalized.endswith("sets") or "lorcana sets" in normalized:
+        return "Sets"
+    if "lots" in normalized:
+        return "Lots"
+
+    accessory_paths = {
+        "playmats": "Playmats",
+        "sleeves": "Sleeves",
+        "deckboxes": "Deck-Boxes",
+        "albums": "Albums",
+        "memorabilia": "Memorabilia",
+        "storage": "Storage",
+        "printedmedia": "Printed-Media",
+        "lifecounter": "Life-Counters",
+    }
+    return accessory_paths.get(normalized.replace(" ", ""), "Accessories")
+
+
+def sealed_product_cardmarket_url(product):
+    product_id = product.get("idProduct")
+    name_slug = slugify(product.get("name") or "")
+    if product_id is None or not name_slug:
+        return None
+
+    category_path = sealed_product_category_path(product.get("categoryName") or "")
+    quoted_slug = urllib.parse.quote(name_slug)
+    return f"https://www.cardmarket.com/en/Lorcana/Products/{category_path}/{quoted_slug}?idProduct={product_id}"
+
+
 def should_include_lorcana_accessory(product):
     text = normalize_key(f"{product.get('name', '')} {product.get('categoryName', '')}")
     return "lorcana" in text or "disney lorcana" in text
 
 
-def build_sealed_product_entry(product, price_guide, source):
+def build_sealed_product_entry(product, price_guide, source, image_by_product_id):
     product_id = product.get("idProduct")
     if product_id is None:
         return None
@@ -575,6 +692,7 @@ def build_sealed_product_entry(product, price_guide, source):
     return {
         "id": f"cardmarket-{product_id}",
         "cardmarket_id": product_id,
+        "cardmarket_url": sealed_product_cardmarket_url(product),
         "name": product.get("name"),
         "category_id": product.get("idCategory"),
         "category_name": category_name,
@@ -582,7 +700,7 @@ def build_sealed_product_entry(product, price_guide, source):
         "expansion_id": product.get("idExpansion"),
         "metacard_id": product.get("idMetacard"),
         "date_added": product.get("dateAdded"),
-        "image_url": None,
+        "image_url": image_by_product_id.get(str(product_id).strip()),
         "currency": "EUR",
         "price_eur": low_price,
         "lowest_price_eur": price.get("lowest_near_mint") or low_price,
@@ -603,15 +721,16 @@ def build_sealed_products(cardmarket_price_guide):
         if should_include_lorcana_accessory(product)
     ]
     accessories_price_guide = fetch_accessories_price_guide()
+    image_by_product_id = load_sealed_product_images()
 
     products = []
     for product in nonsingles:
-        entry = build_sealed_product_entry(product, cardmarket_price_guide, "cardmarket_lorcana_nonsingles")
+        entry = build_sealed_product_entry(product, cardmarket_price_guide, "cardmarket_lorcana_nonsingles", image_by_product_id)
         if entry:
             products.append(entry)
 
     for product in accessories:
-        entry = build_sealed_product_entry(product, accessories_price_guide, "cardmarket_accessories")
+        entry = build_sealed_product_entry(product, accessories_price_guide, "cardmarket_accessories", image_by_product_id)
         if entry:
             products.append(entry)
 
